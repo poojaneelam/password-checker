@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Password Safety Checker</title>
+<link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: light dark; }  /* works in light and dark mode */
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  input[type=password], input[type=text] { width: 100%; padding: 10px; font-size: 16px; box-sizing: border-box; }
+  button { padding: 10px 16px; font-size: 16px; margin-top: 10px; cursor: pointer; }
+  #result { margin-top: 20px; }
+  .bad { color: #d32f2f; } .good { color: #2e9d4f; }
+</style>
+</head>
+<body>
+<h1>Password Safety Checker</h1>
+<input id="pw" type="password" placeholder="Enter a password" autocomplete="off">
+<label><input type="checkbox" id="show"> Show password</label><br>
+<button id="check">Check</button>
+<div id="result"></div>
+<p><small>Your password never leaves your device. Only the first 5 characters of its SHA-1 hash are sent.</small></p>
+
+<script>
+const API_URL = "https://api.pwnedpasswords.com/range/"; // API address; we add the 5-char prefix
+const TIMEOUT_MS = 10000; // give up after 10 seconds so the page never hangs
+
+async function hashPassword(password) {
+  // Return the SHA-1 hash of the password as an UPPERCASE hex string.
+  const bytes = new TextEncoder().encode(password); // text -> bytes, hashing needs bytes
+  const buffer = await crypto.subtle.digest("SHA-1", bytes); // hash runs inside the browser
+  return Array.from(new Uint8Array(buffer))
+    .map(b => b.toString(16).padStart(2, "0")) // each byte -> 2 hex characters
+    .join("").toUpperCase(); // uppercase to match the API's format
+}
+
+async function checkBreach(password) {
+  // Return how many times the password appears in breaches (0 = not found).
+  const fullHash = await hashPassword(password); // 40-character hash
+  const prefix = fullHash.slice(0, 5); // only this part is sent (k-anonymity)
+  const suffix = fullHash.slice(5);    // this part never leaves the device
+  const controller = new AbortController(); // lets us cancel a slow request
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS); // start the timeout
+  try {
+    const response = await fetch(API_URL + prefix, { signal: controller.signal });
+    if (!response.ok) throw new Error("HTTP " + response.status); // server sent an error code
+    const text = await response.text();
+    let count = 0; // stays 0 if our suffix is not in the list
+    for (const line of text.split(/\r?\n/)) { // each line looks like SUFFIX:COUNT
+      if (!line) continue; // skip empty lines
+      const parts = line.split(":");
+      if (parts.length !== 2 || !/^\d+$/.test(parts[1].trim())) throw new Error("BAD_FORMAT");
+      if (parts[0] === suffix) count = parseInt(parts[1], 10); // local comparison
+    }
+    return count;
+  } finally {
+    clearTimeout(timer); // always stop the timer, success or failure
+  }
+}
+
+function checkStrength(password) {
+  // Return a list of tips describing what is missing from the password.
+  const tips = []; // we collect improvement tips here
+  if (password.length < 12) tips.push("Use at least 12 characters.");
+  if (!/[A-Z]/.test(password)) tips.push("Add an uppercase letter (A-Z).");
+  if (!/[a-z]/.test(password)) tips.push("Add a lowercase letter (a-z).");
+  if (!/[0-9]/.test(password)) tips.push("Add a digit (0-9).");
+  if (!/[^A-Za-z0-9]/.test(password)) tips.push("Add a symbol (e.g. ! @ # $ %).");
+  return tips;
+}
+
+document.getElementById("show").addEventListener("change", (e) => {
+  // Switch the box between hidden (password) and visible (text), like on websites
+  document.getElementById("pw").type = e.target.checked ? "text" : "password";
+});
+
+document.getElementById("check").addEventListener("click", async () => {
+  const password = document.getElementById("pw").value;
+  const out = document.getElementById("result");
+  if (!password) { out.textContent = "No password entered."; return; }
+  out.textContent = "Checking..."; // feedback while we wait for the network
+
+  let breachHtml; // no user input goes into these strings, so innerHTML is safe here
+  try {
+    const count = await checkBreach(password);
+    breachHtml = count > 0
+      ? `<p class="bad">DANGER: found ${count.toLocaleString()} times in known breaches. Do not use it!</p>`
+      : `<p class="good">Good news: not found in known breaches.</p>`;
+  } catch (e) { // clear messages instead of crashes
+    if (e.name === "AbortError") breachHtml = "<p>Error: the request timed out. Try again later.</p>";
+    else if (e.message === "BAD_FORMAT") breachHtml = "<p>Error: the API sent a response we couldn't understand.</p>";
+    else if (e.message.startsWith("HTTP")) breachHtml = `<p>Error: the API returned an error (${e.message}).</p>`;
+    else breachHtml = "<p>Error: could not connect. Check your internet connection.</p>";
+  }
+
+  const tips = checkStrength(password);
+  out.innerHTML = `<h3>Breach check</h3>${breachHtml}<h3>Strength check</h3>` +
+    `<p>Checks passed: ${5 - tips.length}/5</p><ul>` +
+    tips.map(t => `<li>${t}</li>`).join("") + "</ul>";
+});
+</script>
+</body>
+</html>
